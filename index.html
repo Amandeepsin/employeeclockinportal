@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WorkFlow — Clock In/Out</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Sora:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Sora', sans-serif;
+            background: #080c14;
+            color: #e2e8f0;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Animated grid background */
+        .bg-grid {
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(99,179,237,0.04) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(99,179,237,0.04) 1px, transparent 1px);
+            background-size: 48px 48px;
+            pointer-events: none;
+            z-index: 0;
+        }
+        .bg-glow {
+            position: fixed;
+            width: 600px; height: 600px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(56,189,248,0.06) 0%, transparent 70%);
+            top: -100px; left: 50%;
+            transform: translateX(-50%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* Kiosk header clock */
+        .live-clock {
+            font-family: 'DM Mono', monospace;
+            font-size: 3rem;
+            font-weight: 500;
+            color: #f0f9ff;
+            letter-spacing: -1px;
+            line-height: 1;
+        }
+        .live-date {
+            font-family: 'DM Mono', monospace;
+            font-size: 0.85rem;
+            color: #64748b;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+
+        /* Employee active tile */
+        .emp-tile {
+            background: linear-gradient(135deg, rgba(15,23,42,0.9) 0%, rgba(15,23,42,0.7) 100%);
+            border: 1px solid rgba(56,189,248,0.2);
+            border-radius: 16px;
+            padding: 20px 24px;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s ease;
+            animation: tileIn 0.4s cubic-bezier(0.34,1.56,0.64,1) both;
+        }
+        .emp-tile::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, #38bdf8, transparent);
+            opacity: 0.7;
+        }
+        .emp-tile:hover {
+            border-color: rgba(56,189,248,0.4);
+            transform: translateY(-2px);
+        }
+
+        @keyframes tileIn {
+            from { opacity: 0; transform: scale(0.9) translateY(10px); }
+            to   { opacity: 1; transform: scale(1) translateY(0); }
+        }
+
+        /* Elapsed time */
+        .elapsed {
+            font-family: 'DM Mono', monospace;
+            font-size: 1.5rem;
+            font-weight: 500;
+            color: #38bdf8;
+            letter-spacing: -0.5px;
+        }
+
+        /* Pulse dot */
+        .pulse-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: #4ade80;
+            position: relative;
+            flex-shrink: 0;
+        }
+        .pulse-dot::after {
+            content: '';
+            position: absolute;
+            inset: -4px;
+            border-radius: 50%;
+            background: rgba(74,222,128,0.3);
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50%       { transform: scale(1.8); opacity: 0; }
+        }
+
+        /* Login panel */
+        .login-panel {
+            background: rgba(15,23,42,0.95);
+            border: 1px solid rgba(56,189,248,0.15);
+            border-radius: 20px;
+            backdrop-filter: blur(20px);
+            padding: 36px;
+            width: 100%;
+            max-width: 380px;
+            animation: panelIn 0.35s cubic-bezier(0.34,1.56,0.64,1) both;
+        }
+        @keyframes panelIn {
+            from { opacity: 0; transform: translateY(20px) scale(0.97); }
+            to   { opacity: 1; transform: translateY(0) scale(1); }
+        }
+
+        .inp {
+            width: 100%;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(100,116,139,0.3);
+            border-radius: 10px;
+            padding: 12px 16px;
+            color: #f1f5f9;
+            font-family: 'Sora', sans-serif;
+            font-size: 0.9rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .inp:focus { border-color: #38bdf8; }
+        .inp::placeholder { color: #475569; }
+
+        .btn-primary {
+            width: 100%;
+            background: linear-gradient(135deg, #0ea5e9, #0284c7);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            padding: 13px;
+            font-family: 'Sora', sans-serif;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            letter-spacing: 0.3px;
+        }
+        .btn-primary:hover { background: linear-gradient(135deg, #38bdf8, #0ea5e9); transform: translateY(-1px); }
+        .btn-primary:active { transform: translateY(0); }
+        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        .btn-clock-out {
+            background: rgba(239,68,68,0.1);
+            border: 1px solid rgba(239,68,68,0.3);
+            color: #f87171;
+            border-radius: 8px;
+            padding: 7px 14px;
+            font-family: 'Sora', sans-serif;
+            font-size: 0.78rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        .btn-clock-out:hover {
+            background: rgba(239,68,68,0.2);
+            border-color: rgba(239,68,68,0.5);
+        }
+
+        /* Avatar */
+        .avatar {
+            width: 40px; height: 40px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #0ea5e9, #7c3aed);
+            display: flex; align-items: center; justify-content: center;
+            font-weight: 700;
+            font-size: 1rem;
+            color: white;
+            flex-shrink: 0;
+        }
+
+        /* Empty state */
+        .empty-state {
+            border: 1px dashed rgba(56,189,248,0.15);
+            border-radius: 16px;
+            padding: 48px 24px;
+            text-align: center;
+            color: #334155;
+        }
+
+        /* Success flash */
+        .flash {
+            animation: flashIn 0.3s ease both, flashOut 0.4s ease 1.8s both;
+        }
+        @keyframes flashIn {
+            from { opacity: 0; transform: translateY(-6px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes flashOut {
+            from { opacity: 1; }
+            to   { opacity: 0; }
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 2px; }
+
+        /* Password toggle */
+        .pw-wrap { position: relative; }
+        .pw-toggle {
+            position: absolute;
+            right: 12px; top: 50%;
+            transform: translateY(-50%);
+            background: none; border: none;
+            color: #475569; cursor: pointer;
+            padding: 2px;
+            display: flex; align-items: center;
+        }
+        .pw-toggle:hover { color: #94a3b8; }
+
+        /* Header badge */
+        .badge-active {
+            background: rgba(74,222,128,0.1);
+            border: 1px solid rgba(74,222,128,0.25);
+            color: #4ade80;
+            border-radius: 20px;
+            padding: 4px 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            font-family: 'DM Mono', monospace;
+        }
+
+        /* Confirm overlay */
+        .overlay {
+            position: fixed; inset: 0;
+            background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(4px);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 100;
+            animation: fadeIn 0.15s ease;
+        }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        .confirm-card {
+            background: #0f172a;
+            border: 1px solid rgba(56,189,248,0.2);
+            border-radius: 20px;
+            padding: 32px;
+            max-width: 360px;
+            width: 90%;
+            text-align: center;
+            animation: panelIn 0.25s ease both;
+        }
+
+        @media (max-width: 640px) {
+            .live-clock { font-size: 2rem; }
+        }
+    </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// ── Firebase setup (same project as WorkFlow)
+const firebaseConfig = {
+    apiKey: "AIzaSyC0z364Ti3fBTrcVzAPgyQamA-JioGTPXo",
+    authDomain: "employee-management-36cb3.firebaseapp.com",
+    projectId: "employee-management-36cb3",
+    storageBucket: "employee-management-36cb3.firebasestorage.app",
+    messagingSenderId: "114401704510",
+    appId: "1:114401704510:web:205da2b3ccae3533bbaf6f"
+};
+
+let db;
+try {
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.firestore();
+} catch(e) {
+    // already initialized
+    db = firebase.firestore();
+}
+
+// ── Helpers
+const pad = n => String(n).padStart(2, '0');
+
+const formatElapsed = (clockInISO) => {
+    const diff = Math.floor((Date.now() - new Date(clockInISO)) / 1000);
+    const h = Math.floor(diff / 3600);
+    const m = Math.floor((diff % 3600) / 60);
+    const s = diff % 60;
+    return h > 0
+        ? `${h}:${pad(m)}:${pad(s)}`
+        : `${pad(m)}:${pad(s)}`;
+};
+
+const formatTime12 = (iso) => {
+    if (!iso) return '--';
+    const d = new Date(iso);
+    let h = d.getHours(), mn = d.getMinutes();
+    const ap = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    return `${h}:${pad(mn)} ${ap}`;
+};
+
+const initials = (name) => name.trim().split(' ').map(w => w[0]?.toUpperCase()).join('').slice(0,2);
+
+// ── EyeIcon inline
+const EyeIcon = ({ open }) => open ? (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+) : (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+);
+
+// ── Main App
+const App = () => {
+    const [employees, setEmployees]   = useState([]);
+    const [tick, setTick]             = useState(0);
+    const [loginForm, setLoginForm]   = useState({ username: '', password: '' });
+    const [showPw, setShowPw]         = useState(false);
+    const [loginError, setLoginError] = useState('');
+    const [loginLoading, setLoginLoading] = useState(false);
+    const [flash, setFlash]           = useState(null); // { name, action: 'in'|'out' }
+    const [confirmClockOut, setConfirmClockOut] = useState(null); // employee obj
+    const [nowStr, setNowStr]         = useState('');
+    const [dateStr, setDateStr]       = useState('');
+
+    // 1-second tick for elapsed timers + live clock
+    useEffect(() => {
+        const interval = setInterval(() => {
+            setTick(t => t + 1);
+            const now = new Date();
+            const h = now.getHours(), m = now.getMinutes(), s = now.getSeconds();
+            const ap = h >= 12 ? 'PM' : 'AM';
+            const h12 = h % 12 || 12;
+            setNowStr(`${h12}:${pad(m)}:${pad(s)} ${ap}`);
+            setDateStr(now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }));
+        }, 1000);
+        return () => clearInterval(interval);
+    }, []);
+
+    // Live listener on employees collection
+    useEffect(() => {
+        const unsub = db.collection('employees').onSnapshot(snap => {
+            const list = [];
+            snap.forEach(doc => list.push({ ...doc.data(), id: doc.id }));
+            // Sort by order field
+            list.sort((a, b) => (a.order ?? 9999) - (b.order ?? 9999));
+            setEmployees(list);
+        });
+        return () => unsub();
+    }, []);
+
+    const clockedInEmployees = employees.filter(e => e.clockedIn && e.clockInTime);
+
+    const handleLogin = async (e) => {
+        e.preventDefault();
+        setLoginError('');
+        setLoginLoading(true);
+
+        const emp = employees.find(
+            e => e.username === loginForm.username.trim() && e.password === loginForm.password
+        );
+
+        if (!emp) {
+            setLoginError('Username or password is incorrect.');
+            setLoginLoading(false);
+            return;
+        }
+
+        if (emp.clockedIn) {
+            setLoginError(`${emp.name} is already clocked in.`);
+            setLoginLoading(false);
+            return;
+        }
+
+        try {
+            const now = new Date().toISOString();
+            await db.collection('employees').doc(emp.id.toString()).update({
+                clockedIn: true,
+                clockInTime: now,
+                clockOutTime: null,
+                isLateToday: false,
+                minutesLate: 0
+            });
+            setFlash({ name: emp.name, action: 'in' });
+            setTimeout(() => setFlash(null), 2200);
+        } catch(err) {
+            setLoginError('Failed to clock in. Try again.');
+        }
+
+        setLoginForm({ username: '', password: '' });
+        setShowPw(false);
+        setLoginLoading(false);
+    };
+
+    const handleClockOut = async (emp) => {
+        setConfirmClockOut(null);
+        try {
+            const now = new Date().toISOString();
+            const clockInISO = emp.clockInTime;
+            const grossMin = Math.max(0, (new Date(now) - new Date(clockInISO)) / 60000);
+            const breakMin = emp.assignedBreakMinutes || 0;
+            const paidMin  = Math.max(0, grossMin - breakMin);
+            const paidHours = parseFloat((paidMin / 60).toFixed(2));
+            const rate = emp.hourlyRate || 0;
+            const pay  = parseFloat((paidHours * rate).toFixed(2));
+
+            const entry = {
+                id: Date.now() + Math.random(),
+                date: now,
+                clockIn: clockInISO,
+                clockOut: now,
+                grossMinutes: Math.round(grossMin),
+                breakMinutes: breakMin,
+                paidMinutes: Math.round(paidMin),
+                paidHours,
+                hourlyRate: rate,
+                pay,
+                wasLate: emp.isLateToday || false,
+                minutesLate: emp.minutesLate || 0
+            };
+
+            const existingHistory = emp.workHistory || [];
+            await db.collection('employees').doc(emp.id.toString()).update({
+                clockedIn: false,
+                clockOutTime: now,
+                workHistory: [...existingHistory, entry],
+                isLateToday: false,
+                minutesLate: 0,
+                assignedBreakMinutes: breakMin
+            });
+
+            setFlash({ name: emp.name, action: 'out' });
+            setTimeout(() => setFlash(null), 2200);
+        } catch(err) {
+            console.error('Clock out error:', err);
+        }
+    };
+
+    return (
+        <div style={{ position: 'relative', minHeight: '100vh' }}>
+            <div className="bg-grid" />
+            <div className="bg-glow" />
+
+            {/* Flash notification */}
+            {flash && (
+                <div className="flash" style={{
+                    position: 'fixed', top: 24, left: '50%', transform: 'translateX(-50%)',
+                    zIndex: 200,
+                    background: flash.action === 'in' ? 'rgba(20,83,45,0.95)' : 'rgba(127,29,29,0.95)',
+                    border: `1px solid ${flash.action === 'in' ? 'rgba(74,222,128,0.4)' : 'rgba(248,113,113,0.4)'}`,
+                    borderRadius: 12, padding: '12px 24px',
+                    color: flash.action === 'in' ? '#4ade80' : '#f87171',
+                    fontWeight: 600, fontSize: '0.9rem',
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    boxShadow: '0 8px 32px rgba(0,0,0,0.4)'
+                }}>
+                    <span>{flash.action === 'in' ? '✓' : '→'}</span>
+                    <span>{flash.name} clocked {flash.action === 'in' ? 'IN' : 'OUT'}</span>
+                </div>
+            )}
+
+            {/* Confirm clock-out overlay */}
+            {confirmClockOut && (
+                <div className="overlay" onClick={() => setConfirmClockOut(null)}>
+                    <div className="confirm-card" onClick={e => e.stopPropagation()}>
+                        <div style={{ fontSize: '2.5rem', marginBottom: 16 }}>👋</div>
+                        <h3 style={{ fontSize: '1.2rem', fontWeight: 700, marginBottom: 8, color: '#f1f5f9' }}>
+                            Clock out {confirmClockOut.name}?
+                        </h3>
+                        <p style={{ color: '#64748b', fontSize: '0.85rem', marginBottom: 24 }}>
+                            Clocked in at {formatTime12(confirmClockOut.clockInTime)} · {formatElapsed(confirmClockOut.clockInTime)} elapsed
+                        </p>
+                        <div style={{ display: 'flex', gap: 10 }}>
+                            <button
+                                onClick={() => setConfirmClockOut(null)}
+                                style={{
+                                    flex: 1, padding: '11px', borderRadius: 10, border: '1px solid rgba(100,116,139,0.3)',
+                                    background: 'transparent', color: '#94a3b8', fontFamily: 'Sora, sans-serif',
+                                    fontWeight: 600, cursor: 'pointer', fontSize: '0.85rem'
+                                }}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={() => handleClockOut(confirmClockOut)}
+                                style={{
+                                    flex: 1, padding: '11px', borderRadius: 10, border: 'none',
+                                    background: 'linear-gradient(135deg, #ef4444, #dc2626)',
+                                    color: 'white', fontFamily: 'Sora, sans-serif',
+                                    fontWeight: 600, cursor: 'pointer', fontSize: '0.85rem'
+                                }}
+                            >
+                                Clock Out
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Main layout */}
+            <div style={{ position: 'relative', zIndex: 1, maxWidth: 1100, margin: '0 auto', padding: '32px 24px' }}>
+
+                {/* Header */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 40, flexWrap: 'wrap', gap: 16 }}>
+                    <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 4 }}>
+                            <h1 style={{ fontFamily: 'Georgia, serif', fontSize: '1.8rem', fontWeight: 700, color: '#f0f9ff' }}>WorkFlow</h1>
+                            <span style={{ color: '#334155', fontSize: '1rem' }}>·</span>
+                            <span style={{ color: '#38bdf8', fontSize: '0.85rem', fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase' }}>Kiosk</span>
+                        </div>
+                        <div className="live-date">{dateStr}</div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                        <div className="live-clock">{nowStr}</div>
+                        {clockedInEmployees.length > 0 && (
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
+                                <span className="badge-active">{clockedInEmployees.length} ON SHIFT</span>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* Two-column layout */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 380px', gap: 32, alignItems: 'start' }}>
+
+                    {/* LEFT — Active employees */}
+                    <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20 }}>
+                            <div className="pulse-dot" />
+                            <h2 style={{ fontSize: '0.8rem', fontWeight: 600, letterSpacing: '2px', textTransform: 'uppercase', color: '#475569' }}>
+                                Currently On Shift
+                            </h2>
+                        </div>
+
+                        {clockedInEmployees.length === 0 ? (
+                            <div className="empty-state">
+                                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#1e293b" strokeWidth="1.5" style={{ marginBottom: 16 }}>
+                                    <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+                                </svg>
+                                <p style={{ fontSize: '0.9rem', color: '#334155' }}>No one is clocked in right now</p>
+                            </div>
+                        ) : (
+                            <div style={{ display: 'grid', gap: 12 }}>
+                                {clockedInEmployees.map(emp => (
+                                    <div key={emp.id} className="emp-tile">
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                                            <div className="avatar">{initials(emp.name)}</div>
+                                            <div style={{ flex: 1, minWidth: 0 }}>
+                                                <div style={{ fontWeight: 600, fontSize: '1rem', color: '#f1f5f9', marginBottom: 2 }}>
+                                                    {emp.name}
+                                                </div>
+                                                <div style={{ fontSize: '0.78rem', color: '#475569', fontFamily: 'DM Mono, monospace' }}>
+                                                    IN @ {formatTime12(emp.clockInTime)}
+                                                    {emp.schedule?.closingTime && (
+                                                        <span style={{ marginLeft: 8, color: '#334155' }}>
+                                                            · until {emp.schedule.closingTime}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            <div style={{ textAlign: 'right', marginRight: 16 }}>
+                                                <div className="elapsed">{formatElapsed(emp.clockInTime)}</div>
+                                                <div style={{ fontSize: '0.7rem', color: '#334155', marginTop: 1, fontFamily: 'DM Mono, monospace' }}>elapsed</div>
+                                            </div>
+                                            <button
+                                                className="btn-clock-out"
+                                                onClick={() => setConfirmClockOut(emp)}
+                                            >
+                                                Clock Out
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* RIGHT — Login panel */}
+                    <div style={{ position: 'sticky', top: 32 }}>
+                        <div className="login-panel">
+                            <div style={{ marginBottom: 28, textAlign: 'center' }}>
+                                <div style={{
+                                    width: 48, height: 48, borderRadius: '50%',
+                                    background: 'linear-gradient(135deg, rgba(14,165,233,0.2), rgba(14,165,233,0.05))',
+                                    border: '1px solid rgba(56,189,248,0.3)',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    margin: '0 auto 16px'
+                                }}>
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" strokeWidth="2">
+                                        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+                                    </svg>
+                                </div>
+                                <h2 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#f1f5f9', marginBottom: 4 }}>Clock In</h2>
+                                <p style={{ fontSize: '0.8rem', color: '#475569' }}>Enter your credentials to start your shift</p>
+                            </div>
+
+                            <form onSubmit={handleLogin} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                                <div>
+                                    <label style={{ display: 'block', fontSize: '0.75rem', color: '#64748b', marginBottom: 6, fontWeight: 600, letterSpacing: '0.5px', textTransform: 'uppercase' }}>
+                                        Username
+                                    </label>
+                                    <input
+                                        className="inp"
+                                        type="text"
+                                        placeholder="your.username"
+                                        value={loginForm.username}
+                                        onChange={e => setLoginForm({ ...loginForm, username: e.target.value })}
+                                        required
+                                        autoComplete="off"
+                                        autoCapitalize="none"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label style={{ display: 'block', fontSize: '0.75rem', color: '#64748b', marginBottom: 6, fontWeight: 600, letterSpacing: '0.5px', textTransform: 'uppercase' }}>
+                                        Password
+                                    </label>
+                                    <div className="pw-wrap">
+                                        <input
+                                            className="inp"
+                                            type={showPw ? 'text' : 'password'}
+                                            placeholder="••••••••"
+                                            value={loginForm.password}
+                                            onChange={e => setLoginForm({ ...loginForm, password: e.target.value })}
+                                            required
+                                            style={{ paddingRight: 40 }}
+                                        />
+                                        <button type="button" className="pw-toggle" onClick={() => setShowPw(p => !p)}>
+                                            <EyeIcon open={showPw} />
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {loginError && (
+                                    <div style={{
+                                        background: 'rgba(239,68,68,0.08)',
+                                        border: '1px solid rgba(239,68,68,0.25)',
+                                        borderRadius: 8, padding: '10px 14px',
+                                        color: '#f87171', fontSize: '0.8rem'
+                                    }}>
+                                        {loginError}
+                                    </div>
+                                )}
+
+                                <button className="btn-primary" type="submit" disabled={loginLoading} style={{ marginTop: 4 }}>
+                                    {loginLoading ? 'Clocking in…' : 'Clock In →'}
+                                </button>
+                            </form>
+
+                            {/* Divider */}
+                            <div style={{ borderTop: '1px solid rgba(100,116,139,0.15)', margin: '24px 0 16px' }} />
+
+                            {/* Mini legend */}
+                            <div style={{ display: 'flex', justifyContent: 'center', gap: 20, fontSize: '0.72rem', color: '#334155' }}>
+                                <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', display: 'inline-block' }} />
+                                    Clocked in
+                                </span>
+                                <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#334155', display: 'inline-block' }} />
+                                    Off shift
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>
