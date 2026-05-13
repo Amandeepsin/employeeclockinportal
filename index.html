@@ -554,23 +554,15 @@ const App = () => {
     //   - 5 min past their scheduled closing time still clocked-in → "missed clock-out" alert
     //
     // Alerts are NOT location-bound — they're based on Firebase data, not which
-    // kiosk is checking. Any kiosk in any location runs the same check, and
-    // Firebase dedup (below) ensures exactly one alert fires per employee per
-    // event per day. This means alerts still work if one location's iPad is
-    // offline, as long as ANY kiosk anywhere is running.
+    // kiosk is checking. Firebase dedup ensures exactly one alert fires per
+    // employee per event per day even when multiple iPads run the check.
     //
-    // DEDUPLICATION: We use Firebase as the source of truth, not localStorage.
-    // Before sending, kiosk writes a flag to `alertsLog/{empId}_{date}_{type}`. If
-    // the doc already exists, another kiosk already fired that alert today, so
-    // we skip. Multiple iPads anywhere act as redundant backups.
+    // NOTE: Requires at least one iPad to be awake with this page open.
+    // Set iPadOS auto-lock to "Never" and keep it plugged in.
     useEffect(() => {
-        // Don't require kioskIP for alert checks anymore — they're global.
-        // (kioskIP still matters for the display filter elsewhere.)
-
         const GRACE_MINUTES = 5;
         const channel = 'whatsapp';
 
-        // Parse "HH:MM" 24-hour time today (in browser local tz — accurate enough for store hours)
         const parseToday = (timeStr) => {
             if (!timeStr || !timeStr.includes(':')) return null;
             const [h, m] = timeStr.split(':').map(Number);
@@ -584,15 +576,10 @@ const App = () => {
             return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
         };
 
-        // Atomically claim an alert before sending. Returns true if this kiosk
-        // is the first to flag it (and should send), false if another already did.
         const claimAlert = async (empId, type, today) => {
             const docId = `${empId}_${today}_${type}`;
             const ref = db.collection('alertsLog').doc(docId);
             try {
-                // Use a transaction: read-then-write atomically. If the doc exists,
-                // someone already claimed this alert → return false. Otherwise
-                // write the claim and return true.
                 const claimed = await db.runTransaction(async (tx) => {
                     const snap = await tx.get(ref);
                     if (snap.exists) return false;
@@ -608,27 +595,17 @@ const App = () => {
                 return claimed;
             } catch (err) {
                 console.error('[Alerts] Claim transaction failed:', err);
-                return false; // fail closed — don't send if we can't dedup
+                return false;
             }
         };
 
         const check = async () => {
             const now = new Date();
             const today = todayKey();
-
-            // Check ALL employees in the system, regardless of location.
-            // Alerts aren't location-bound — they fire based on whether someone
-            // clocked in/out on time, which is a Firebase fact, not a place.
-            // Firebase dedup ensures only one alert per employee per event per day
-            // even though every running kiosk runs this same check.
             for (const emp of employees) {
-                // ── GATE: skip employees with alerts turned off in the main portal
                 if (!emp.alertsEnabled) continue;
-
                 const open  = parseToday(emp.schedule?.openingTime);
                 const close = parseToday(emp.schedule?.closingTime);
-
-                // ── 1. MISSED CLOCK-IN ALERT
                 if (open && !emp.clockedIn) {
                     const minsLate = (now - open) / 60000;
                     if (minsLate >= GRACE_MINUTES && minsLate < 480) {
@@ -641,8 +618,6 @@ const App = () => {
                         }
                     }
                 }
-
-                // ── 2. MISSED CLOCK-OUT ALERT
                 if (close && emp.clockedIn) {
                     const minsOver = (now - close) / 60000;
                     if (minsOver >= GRACE_MINUTES && minsOver < 480) {
@@ -658,8 +633,8 @@ const App = () => {
             }
         };
 
-        check(); // run once immediately
-        const interval = setInterval(check, 60 * 1000); // then every 60s
+        check();
+        const interval = setInterval(check, 60 * 1000);
         return () => clearInterval(interval);
     }, [employees, owner, kioskIP]);
 
@@ -1055,7 +1030,7 @@ const App = () => {
                         <div className="login-panel">
                             <div style={{ marginBottom: 20, textAlign: 'center' }}>
                                 <div style={{
-                                    width: 140, height: 180, borderRadius: '50%',
+                                    width: 200, height: 150, borderRadius: 16,
                                     overflow: 'hidden',
                                     margin: '0 auto 14px',
                                     background: cameraError ? 'rgba(239,68,68,0.08)' : 'rgba(15,23,42,0.6)',
