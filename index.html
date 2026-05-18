@@ -14,6 +14,8 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="WorkFlow">
     <meta name="theme-color" content="#0f172a">
+    <!-- Persist camera permission across reloads -->
+    <meta http-equiv="Permissions-Policy" content="camera=(self)">
 
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -315,33 +317,64 @@ try {
 }
 
 // ════════════════════════════════════════════════════════════════
-// ALERTS CONFIG — Twilio SMS/WhatsApp via Netlify function
+// EMAIL ALERTS CONFIG — EmailJS
 // ════════════════════════════════════════════════════════════════
-const ALERTS_ENDPOINT = 'https://illustrious-belekoy-7b66ee.netlify.app/.netlify/functions/twilio-alert';
-const ALERTS_SECRET   = 'wf_alerts_87402bdsbd';
+// Single template handles both owner and employee recipients.
+// The kiosk passes a pre-formatted {{subject_line}} and {{message_body}}
+// so the template stays simple and bypasses EmailJS's 2-template limit
+// on the free plan.
+const EMAILJS_PUBLIC_KEY = 'kCr-3kOwysUk3qmb_';
+const EMAILJS_SERVICE_ID = 'service_sfiwb1c';
+const EMAILJS_ALERT_TEMPLATE_ID = 'template_skn1j5b';  // WorkFlow Owner Alert template
 
-// ── sendAlert — fires an SMS or WhatsApp to a phone number
-async function sendAlert({ to, message, channel = 'sms' }) {
+// ── sendAlertEmail — sends an alert via EmailJS
+// recipient: 'owner' or 'employee' (decides wording of subject + body)
+async function sendAlertEmail({ recipient, to, toName, employeeName, alertType, shiftTime, date }) {
     if (!to) return { ok: false, error: 'no recipient' };
-    if (ALERTS_ENDPOINT.includes('YOUR-SITE')) {
-        console.warn('[Alerts] Endpoint not configured. Would have sent:', { to, message, channel });
-        return { ok: false, error: 'endpoint not configured' };
+
+    // Build subject + body based on who's receiving it
+    let subjectLine, messageBody;
+    if (recipient === 'employee') {
+        subjectLine = `Reminder: ${alertType}`;
+        messageBody =
+            `This is a reminder that you have a ${alertType} today.\n\n` +
+            `Date: ${date}\n` +
+            `Scheduled shift time: ${shiftTime}\n\n` +
+            `If this is a mistake, please clock in/out as soon as possible or contact your manager.`;
+    } else {
+        subjectLine = `WorkFlow Alert: ${employeeName} — ${alertType}`;
+        messageBody =
+            `${employeeName} has a ${alertType} alert.\n\n` +
+            `Date: ${date}\n` +
+            `Scheduled shift time: ${shiftTime}\n\n` +
+            `Please follow up as needed.`;
     }
+
     try {
-        const resp = await fetch(ALERTS_ENDPOINT, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ secret: ALERTS_SECRET, to, message, channel })
-        });
-        const data = await resp.json();
-        if (!resp.ok) {
-            console.error('[Alerts] Twilio error:', data);
-            return { ok: false, error: data.error || 'twilio error' };
+        // Lazy-load EmailJS SDK
+        if (typeof emailjs === 'undefined') {
+            await new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = 'https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js';
+                script.onload = resolve;
+                script.onerror = () => reject(new Error('Failed to load EmailJS'));
+                document.head.appendChild(script);
+            });
         }
-        return { ok: true, sid: data.sid };
+        if (!emailjs._userID) {
+            emailjs.init(EMAILJS_PUBLIC_KEY);
+        }
+        const params = {
+            to_email: to,
+            to_name: toName || 'there',
+            subject_line: subjectLine,
+            message_body: messageBody
+        };
+        await emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_ALERT_TEMPLATE_ID, params);
+        return { ok: true };
     } catch (err) {
-        console.error('[Alerts] Network error:', err);
-        return { ok: false, error: err.message };
+        console.error('[EmailAlerts] Send error:', err);
+        return { ok: false, error: err.message || 'email failed' };
     }
 }
 
@@ -454,6 +487,22 @@ const App = () => {
     const [kioskIP, setKioskIP]       = useState(null);     // this iPad's public IP
     const [kioskIPError, setKioskIPError] = useState(null); // null until detection completes
     const [owner, setOwner]           = useState(null);     // for owner phone + alert channel
+
+    // ── Online/offline detection.
+    // navigator.onLine + the online/offline events catch the obvious cases
+    // (wifi dropped). It's not perfect — onLine can be true while the connection
+    // is dead — so clock-in/out also do a live Firebase check before writing.
+    const [isOnline, setIsOnline] = useState(navigator.onLine);
+    useEffect(() => {
+        const goOnline = () => setIsOnline(true);
+        const goOffline = () => setIsOnline(false);
+        window.addEventListener('online', goOnline);
+        window.addEventListener('offline', goOffline);
+        return () => {
+            window.removeEventListener('online', goOnline);
+            window.removeEventListener('offline', goOffline);
+        };
+    }, []);
 
     // ── Camera stream (continuous, live oval preview above clock-in form)
     const videoRef = useRef(null);
@@ -572,7 +621,6 @@ const App = () => {
     // Set iPadOS auto-lock to "Never" and keep it plugged in.
     useEffect(() => {
         const GRACE_MINUTES = 5;
-        const channel = 'whatsapp';
 
         const parseToday = (timeStr) => {
             if (!timeStr || !timeStr.includes(':')) return null;
@@ -617,14 +665,36 @@ const App = () => {
                 if (!emp.alertsEnabled) continue;
                 const open  = parseToday(emp.schedule?.openingTime);
                 const close = parseToday(emp.schedule?.closingTime);
+                const dateLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
+
                 if (open && !emp.clockedIn) {
                     const minsLate = (now - open) / 60000;
                     if (minsLate >= GRACE_MINUTES && minsLate < 480) {
                         const claimed = await claimAlert(emp.id, 'lateIn', today);
                         if (claimed) {
-                            const msg = `WorkFlow: ${emp.name} has not clocked in. Shift started at ${emp.schedule.openingTime}.`;
-                            if (owner?.alertPhone) {
-                                sendAlert({ to: owner.alertPhone, message: msg, channel });
+                            // Email to owner
+                            if (owner?.email) {
+                                sendAlertEmail({
+                                    recipient: 'owner',
+                                    to: owner.email,
+                                    toName: 'Owner',
+                                    employeeName: emp.name,
+                                    alertType: 'Missed Clock-In',
+                                    shiftTime: emp.schedule.openingTime,
+                                    date: dateLabel
+                                });
+                            }
+                            // Email to employee
+                            if (emp.email) {
+                                sendAlertEmail({
+                                    recipient: 'employee',
+                                    to: emp.email,
+                                    toName: emp.name.split(' ')[0],
+                                    employeeName: emp.name,
+                                    alertType: 'Missed Clock-In',
+                                    shiftTime: emp.schedule.openingTime,
+                                    date: dateLabel
+                                });
                             }
                         }
                     }
@@ -634,9 +704,29 @@ const App = () => {
                     if (minsOver >= GRACE_MINUTES && minsOver < 480) {
                         const claimed = await claimAlert(emp.id, 'lateOut', today);
                         if (claimed) {
-                            const msg = `WorkFlow: ${emp.name} has not clocked out. Shift ended at ${emp.schedule.closingTime}.`;
-                            if (owner?.alertPhone) {
-                                sendAlert({ to: owner.alertPhone, message: msg, channel });
+                            // Email to owner
+                            if (owner?.email) {
+                                sendAlertEmail({
+                                    recipient: 'owner',
+                                    to: owner.email,
+                                    toName: 'Owner',
+                                    employeeName: emp.name,
+                                    alertType: 'Missed Clock-Out',
+                                    shiftTime: emp.schedule.closingTime,
+                                    date: dateLabel
+                                });
+                            }
+                            // Email to employee
+                            if (emp.email) {
+                                sendAlertEmail({
+                                    recipient: 'employee',
+                                    to: emp.email,
+                                    toName: emp.name.split(' ')[0],
+                                    employeeName: emp.name,
+                                    alertType: 'Missed Clock-Out',
+                                    shiftTime: emp.schedule.closingTime,
+                                    date: dateLabel
+                                });
                             }
                         }
                     }
@@ -653,6 +743,13 @@ const App = () => {
         e.preventDefault();
         setLoginError('');
         setLoginLoading(true);
+
+        // ── Offline guard: no internet = can't verify or record anything.
+        if (!navigator.onLine) {
+            setLoginError('No internet connection. Clock-in is unavailable — please notify the owner so your shift can be added manually.');
+            setLoginLoading(false);
+            return;
+        }
 
         const emp = employees.find(
             e => e.username === loginForm.username.trim() && e.password === loginForm.password
@@ -685,7 +782,10 @@ const App = () => {
             const photo = grabFrame(videoRef.current);
             const photoMissingIn = !photo;
 
-            await db.collection('employees').doc(emp.id.toString()).update({
+            // Race the Firebase write against a 12s timeout. navigator.onLine can
+            // report true while the connection is actually dead — without this,
+            // the write would hang and the employee would stare at a spinner.
+            const writePromise = db.collection('employees').doc(emp.id.toString()).update({
                 clockedIn: true,
                 clockInTime: now,
                 clockOutTime: null,
@@ -694,20 +794,33 @@ const App = () => {
                 isLateToday: false,
                 minutesLate: 0
             });
+            await Promise.race([
+                writePromise,
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 12000))
+            ]);
 
-            // ── If photo failed, fire owner alert
-            if (photoMissingIn && owner?.alertPhone) {
-                sendAlert({
-                    to: owner.alertPhone,
-                    message: `WorkFlow: ${emp.name} clocked in without a photo (${cameraError || 'camera unavailable'}).`,
-                    channel: 'whatsapp'
+            // ── If photo failed, email owner
+            if (photoMissingIn && owner?.email) {
+                const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
+                sendAlertEmail({
+                    recipient: 'owner',
+                    to: owner.email,
+                    toName: 'Owner',
+                    employeeName: emp.name,
+                    alertType: 'Camera Failure (Clock-In)',
+                    shiftTime: emp.schedule?.openingTime || 'N/A',
+                    date: today
                 });
             }
 
             setFlash({ name: emp.name, action: 'in' });
             setTimeout(() => setFlash(null), 2200);
         } catch(err) {
-            setLoginError('Failed to clock in. Try again.');
+            if (err.message === 'timeout') {
+                setLoginError('Connection problem — clock-in could not be saved. Please notify the owner so your shift can be added manually.');
+            } else {
+                setLoginError('Failed to clock in. Try again.');
+            }
         }
 
         setLoginForm({ username: '', password: '' });
@@ -721,6 +834,13 @@ const App = () => {
             setClockOutError('Incorrect password.');
             return;
         }
+
+        // ── Offline guard
+        if (!navigator.onLine) {
+            setClockOutError('No internet connection. Clock-out is unavailable — please notify the owner so your shift can be corrected manually.');
+            return;
+        }
+
         setClockOutLoading(true);
         setClockOutError('');
 
@@ -773,7 +893,7 @@ const App = () => {
             };
 
             const existingHistory = emp.workHistory || [];
-            await db.collection('employees').doc(emp.id.toString()).update({
+            const writePromise = db.collection('employees').doc(emp.id.toString()).update({
                 clockedIn: false,
                 clockOutTime: now,
                 workHistory: [...existingHistory, entry],
@@ -783,13 +903,22 @@ const App = () => {
                 isLateToday: false,
                 minutesLate: 0
             });
+            await Promise.race([
+                writePromise,
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 12000))
+            ]);
 
-            // ── If photo failed, fire owner alert
-            if (photoMissingOut && owner?.alertPhone) {
-                sendAlert({
-                    to: owner.alertPhone,
-                    message: `WorkFlow: ${emp.name} clocked out without a photo (${cameraError || 'camera unavailable'}).`,
-                    channel: 'whatsapp'
+            // ── If photo failed, email owner
+            if (photoMissingOut && owner?.email) {
+                const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
+                sendAlertEmail({
+                    recipient: 'owner',
+                    to: owner.email,
+                    toName: 'Owner',
+                    employeeName: emp.name,
+                    alertType: 'Camera Failure (Clock-Out)',
+                    shiftTime: emp.schedule?.closingTime || 'N/A',
+                    date: today
                 });
             }
 
@@ -797,7 +926,11 @@ const App = () => {
             setTimeout(() => setFlash(null), 2200);
         } catch(err) {
             console.error('Clock out error:', err);
-            setClockOutError('Failed to clock out. Try again.');
+            if (err.message === 'timeout') {
+                setClockOutError('Connection problem — clock-out could not be saved. Please notify the owner.');
+            } else {
+                setClockOutError('Failed to clock out. Try again.');
+            }
             setClockOutLoading(false);
             return;
         }
@@ -814,6 +947,25 @@ const App = () => {
         <div style={{ position: 'relative', minHeight: '100vh' }}>
             <div className="bg-grid" />
             <div className="bg-glow" />
+
+            {/* Offline banner — sticks to top, always visible while offline */}
+            {!isOnline && (
+                <div style={{
+                    position: 'fixed', top: 0, left: 0, right: 0,
+                    zIndex: 300,
+                    background: 'rgba(127,29,29,0.97)',
+                    borderBottom: '1px solid rgba(248,113,113,0.5)',
+                    color: '#fecaca',
+                    padding: '12px 20px',
+                    textAlign: 'center',
+                    fontSize: '0.9rem',
+                    fontWeight: 600,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8
+                }}>
+                    <span style={{ fontSize: '1.1rem' }}>⚠️</span>
+                    No internet connection — clock-in and clock-out are unavailable. Notify the owner so shifts can be added manually.
+                </div>
+            )}
 
             {/* Flash notification */}
             {flash && (
@@ -1138,8 +1290,8 @@ const App = () => {
                                     </div>
                                 )}
 
-                                <button className="btn-primary" type="submit" disabled={loginLoading} style={{ marginTop: 4 }}>
-                                    {loginLoading ? 'Clocking in…' : 'Clock In →'}
+                                <button className="btn-primary" type="submit" disabled={loginLoading || !isOnline} style={{ marginTop: 4, opacity: (!isOnline ? 0.5 : 1) }}>
+                                    {!isOnline ? 'Offline — unavailable' : (loginLoading ? 'Clocking in…' : 'Clock In →')}
                                 </button>
                             </form>
 
