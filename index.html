@@ -607,143 +607,11 @@ const App = () => {
     const clockedInEmployees = employees.filter(e => {
         if (!e.clockedIn || !e.clockInTime) return false;
         if (!kioskIP) return false;
-        if (!Array.isArray(e.allowedIPs) || e.allowedIPs.length === 0) return false;
+        // Employees with no IP restriction can clock in from any kiosk, so they must
+        // also SHOW on every kiosk — otherwise they can never clock out.
+        if (!Array.isArray(e.allowedIPs) || e.allowedIPs.length === 0) return true;
         return e.allowedIPs.includes(kioskIP);
     });
-
-    // ════════════════════════════════════════════════════════════════
-    // LATE / MISSED CLOCK ALERTS
-    // ════════════════════════════════════════════════════════════════
-    // Runs every 60 seconds. Checks EVERY employee in the system (not just
-    // local ones) for:
-    //   - 5 min past their scheduled opening time with no clock-in → "missed clock-in" alert
-    //   - 5 min past their scheduled closing time still clocked-in → "missed clock-out" alert
-    //
-    // Alerts are NOT location-bound — they're based on Firebase data, not which
-    // kiosk is checking. Firebase dedup ensures exactly one alert fires per
-    // employee per event per day even when multiple iPads run the check.
-    //
-    // NOTE: Requires at least one iPad to be awake with this page open.
-    // Set iPadOS auto-lock to "Never" and keep it plugged in.
-    useEffect(() => {
-        const GRACE_MINUTES = 5;
-
-        const parseToday = (timeStr) => {
-            if (!timeStr || !timeStr.includes(':')) return null;
-            const [h, m] = timeStr.split(':').map(Number);
-            const d = new Date();
-            d.setHours(h, m, 0, 0);
-            return d;
-        };
-
-        const todayKey = () => {
-            const d = new Date();
-            return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-        };
-
-        const claimAlert = async (empId, type, today) => {
-            const docId = `${empId}_${today}_${type}`;
-            const ref = db.collection('alertsLog').doc(docId);
-            try {
-                const claimed = await db.runTransaction(async (tx) => {
-                    const snap = await tx.get(ref);
-                    if (snap.exists) return false;
-                    tx.set(ref, {
-                        empId,
-                        type,
-                        date: today,
-                        firedAt: new Date().toISOString(),
-                        firedBy: kioskIP || 'unknown'
-                    });
-                    return true;
-                });
-                return claimed;
-            } catch (err) {
-                console.error('[Alerts] Claim transaction failed:', err);
-                return false;
-            }
-        };
-
-        const check = async () => {
-            const now = new Date();
-            const today = todayKey();
-            for (const emp of employees) {
-                if (!emp.alertsEnabled) continue;
-                const open  = parseToday(emp.schedule?.openingTime);
-                const close = parseToday(emp.schedule?.closingTime);
-                const dateLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
-
-                if (open && !emp.clockedIn) {
-                    const minsLate = (now - open) / 60000;
-                    if (minsLate >= GRACE_MINUTES && minsLate < 480) {
-                        const claimed = await claimAlert(emp.id, 'lateIn', today);
-                        if (claimed) {
-                            // Email to owner
-                            if (owner?.email) {
-                                sendAlertEmail({
-                                    recipient: 'owner',
-                                    to: owner.email,
-                                    toName: 'Owner',
-                                    employeeName: emp.name,
-                                    alertType: 'Missed Clock-In',
-                                    shiftTime: emp.schedule.openingTime,
-                                    date: dateLabel
-                                });
-                            }
-                            // Email to employee
-                            if (emp.email) {
-                                sendAlertEmail({
-                                    recipient: 'employee',
-                                    to: emp.email,
-                                    toName: emp.name.split(' ')[0],
-                                    employeeName: emp.name,
-                                    alertType: 'Missed Clock-In',
-                                    shiftTime: emp.schedule.openingTime,
-                                    date: dateLabel
-                                });
-                            }
-                        }
-                    }
-                }
-                if (close && emp.clockedIn) {
-                    const minsOver = (now - close) / 60000;
-                    if (minsOver >= GRACE_MINUTES && minsOver < 480) {
-                        const claimed = await claimAlert(emp.id, 'lateOut', today);
-                        if (claimed) {
-                            // Email to owner
-                            if (owner?.email) {
-                                sendAlertEmail({
-                                    recipient: 'owner',
-                                    to: owner.email,
-                                    toName: 'Owner',
-                                    employeeName: emp.name,
-                                    alertType: 'Missed Clock-Out',
-                                    shiftTime: emp.schedule.closingTime,
-                                    date: dateLabel
-                                });
-                            }
-                            // Email to employee
-                            if (emp.email) {
-                                sendAlertEmail({
-                                    recipient: 'employee',
-                                    to: emp.email,
-                                    toName: emp.name.split(' ')[0],
-                                    employeeName: emp.name,
-                                    alertType: 'Missed Clock-Out',
-                                    shiftTime: emp.schedule.closingTime,
-                                    date: dateLabel
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        };
-
-        check();
-        const interval = setInterval(check, 60 * 1000);
-        return () => clearInterval(interval);
-    }, [employees, owner, kioskIP]);
 
     const handleLogin = async (e) => {
         e.preventDefault();
@@ -768,7 +636,10 @@ const App = () => {
         }
 
         if (emp.clockedIn) {
-            setLoginError(`${emp.name} is already clocked in.`);
+            // They're still clocked in (e.g. forgot to clock out yesterday, or their
+            // tile isn't showing on this kiosk). Open the clock-out screen for them.
+            setLoginError(`${emp.name} is still clocked in from ${formatTime12(emp.clockInTime)} on ${new Date(emp.clockInTime).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. Clock out first.`);
+            setConfirmClockOut(emp);
             setLoginLoading(false);
             return;
         }
@@ -791,14 +662,25 @@ const App = () => {
             // Race the Firebase write against a 12s timeout. navigator.onLine can
             // report true while the connection is actually dead — without this,
             // the write would hang and the employee would stare at a spinner.
+            // ── Work out lateness against today's scheduled opening time
+            let minutesLate = 0;
+            const openStr = emp.schedule?.openingTime;
+            if (openStr && openStr.includes(':')) {
+                const [oh, om] = openStr.split(':').map(Number);
+                const openAt = new Date();
+                openAt.setHours(oh, om, 0, 0);
+                minutesLate = Math.max(0, Math.round((new Date(now) - openAt) / 60000));
+                if (minutesLate > 480) minutesLate = 0; // way outside the shift — not a "late" clock-in
+            }
+
             const writePromise = db.collection('employees').doc(emp.id.toString()).update({
                 clockedIn: true,
                 clockInTime: now,
                 clockOutTime: null,
                 clockInPhoto: photo,
                 photoMissingIn: photoMissingIn,
-                isLateToday: false,
-                minutesLate: 0
+                isLateToday: minutesLate > 0,
+                minutesLate: minutesLate
             });
             await Promise.race([
                 writePromise,
@@ -868,6 +750,22 @@ const App = () => {
         }
 
         try {
+            // ── Re-read the live record. The overlay holds a snapshot that may be stale
+            // (e.g. the owner force-clocked-out this person from the main portal).
+            const freshSnap = await db.collection('employees').doc(emp.id.toString()).get();
+            const fresh = freshSnap.exists ? { ...freshSnap.data(), id: freshSnap.id } : null;
+            if (!fresh || !fresh.clockedIn || !fresh.clockInTime) {
+                setConfirmClockOut(null);
+                setClockOutPassword('');
+                setClockOutError('');
+                setShowClockOutPw(false);
+                setClockOutLoading(false);
+                setFlash({ name: emp.name, action: 'denied', message: `${emp.name} is already clocked out.` });
+                setTimeout(() => setFlash(null), 3000);
+                return;
+            }
+            emp = fresh;
+
             const now = new Date().toISOString();
             const clockInISO = emp.clockInTime;
             const grossMin = Math.max(0, (new Date(now) - new Date(clockInISO)) / 60000);
@@ -895,24 +793,87 @@ const App = () => {
                 hourlyRate: rate,
                 pay,
                 wasLate: emp.isLateToday || false,
-                minutesLate: emp.minutesLate || 0
+                minutesLate: emp.minutesLate || 0,
+                // Over 14 hours almost always means a forgotten clock-out — flag for owner review
+                needsReview: grossMin > 14 * 60
             };
 
-            const existingHistory = emp.workHistory || [];
-            const writePromise = db.collection('employees').doc(emp.id.toString()).update({
+            const empRef = db.collection('employees').doc(emp.id.toString());
+            const withTimeout = (promise) => Promise.race([
+                promise,
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 12000))
+            ]);
+
+            // ── STEP 1 (critical): mark the employee clocked OUT.
+            // This write only shrinks the document, so it succeeds even when the
+            // employee doc is close to Firestore's 1 MB limit (photos in workHistory
+            // make the doc grow every shift — once it hit the limit, the old single
+            // write was rejected and the employee stayed "clocked in").
+            await withTimeout(empRef.update({
                 clockedIn: false,
                 clockOutTime: now,
-                workHistory: [...existingHistory, entry],
-                // Clear ephemeral photo from employee doc now that it's saved in workHistory
                 clockInPhoto: null,
                 photoMissingIn: false,
                 isLateToday: false,
                 minutesLate: 0
-            });
-            await Promise.race([
-                writePromise,
-                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 12000))
-            ]);
+            }));
+
+            // ── STEP 2: save the shift to workHistory.
+            // arrayUnion appends on the server, so a stale copy of workHistory on
+            // this iPad can never overwrite edits made from the main portal.
+            let historySaved = false;
+            let photosDropped = false;
+            try {
+                await withTimeout(empRef.update({
+                    workHistory: firebase.firestore.FieldValue.arrayUnion(entry)
+                }));
+                historySaved = true;
+            } catch (histErr) {
+                console.error('History write with photos failed, retrying without photos:', histErr);
+                try {
+                    await withTimeout(empRef.update({
+                        workHistory: firebase.firestore.FieldValue.arrayUnion({
+                            ...entry,
+                            clockInPhoto: null,
+                            clockOutPhoto: null,
+                            photosDroppedStorageFull: true
+                        })
+                    }));
+                    historySaved = true;
+                    photosDropped = true;
+                } catch (histErr2) {
+                    console.error('History write failed completely:', histErr2);
+                }
+            }
+
+            // Tell the owner about a suspiciously long shift (forgot to clock out)
+            if (entry.needsReview && owner?.email) {
+                sendAlertEmail({
+                    recipient: 'owner',
+                    to: owner.email,
+                    toName: 'Owner',
+                    employeeName: emp.name,
+                    alertType: `Very long shift (${paidHours} h) — likely forgot to clock out, please correct hours`,
+                    shiftTime: `${formatTime12(clockInISO)} to ${formatTime12(now)}`,
+                    date: new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' })
+                });
+            }
+
+            // Tell the owner if the shift record needs attention
+            if ((!historySaved || photosDropped) && owner?.email) {
+                const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
+                sendAlertEmail({
+                    recipient: 'owner',
+                    to: owner.email,
+                    toName: 'Owner',
+                    employeeName: emp.name,
+                    alertType: historySaved
+                        ? 'Clocked out — photos not saved (employee record full, clear old photos)'
+                        : `Clocked out — shift NOT saved to history, add manually (${formatTime12(clockInISO)} to ${formatTime12(now)})`,
+                    shiftTime: emp.schedule?.closingTime || 'N/A',
+                    date: today
+                });
+            }
 
             // ── If photo failed, email owner
             if (photoMissingOut && owner?.email) {
